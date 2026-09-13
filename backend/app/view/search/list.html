@@ -1,148 +1,482 @@
 <?php
 $title = '搜索结果';
+
+/** @var \app\service\SearchFilters|null $filters */
+$filters = $filters ?? null;
+
+$typeLabels = [
+    'video' => '视频',
+    'audio' => '音频',
+    'image' => '图片',
+    'archive' => '压缩/镜像',
+    'document' => '文档',
+    'software' => '软件',
+    'other' => '其他',
+];
+$tagLabels = [
+    'movie' => '电影',
+    'tv' => '剧集',
+    'anime' => '动漫',
+    'music' => '音乐',
+    'game' => '游戏',
+    'software' => '软件资源',
+    'book' => '电子书',
+];
+
+$activeTypes = $filters ? $filters->types() : [];
+$activeTags = $filters ? $filters->tags() : [];
+
+// 切换某个多选值时保留其它所有条件（含关键词）
+$toggleUrl = function (string $key, string $value, array $active) use ($q, $filters) {
+    $next = in_array($value, $active, true)
+        ? array_values(array_diff($active, [$value]))
+        : array_merge($active, [$value]);
+    $params = $filters->toQueryParams((string) $q);
+    if ($next) {
+        $params[$key] = implode(',', $next);
+    } else {
+        unset($params[$key]);
+    }
+    return '/search' . ($params ? '?' . http_build_query($params) : '');
+};
+
+// 排序链接
+$sortUrl = function (string $newSort) use ($q, $filters) {
+    $params = $filters->toQueryParams((string) $q);
+    $defaultSort = ((string) $q) !== '' ? 'relevance' : 'new';
+    if ($newSort === $defaultSort) {
+        unset($params['sort']);
+    } else {
+        $params['sort'] = $newSort;
+    }
+    return '/search' . ($params ? '?' . http_build_query($params) : '');
+};
+
+// 大小换算成 MB 用于输入框回显
+$sizeToMb = function ($bytes): string {
+    if ($bytes === null || (int) $bytes <= 0) {
+        return '';
+    }
+    return rtrim(rtrim(number_format(((int) $bytes) / 1048576, 2, '.', ''), '0'), '.');
+};
+$sizeMinMb = $sizeToMb($filters ? $filters->sizeMin() : null);
+$sizeMaxMb = $sizeToMb($filters ? $filters->sizeMax() : null);
+$sinceDate = $filters && $filters->since() !== null ? date('Y-m-d', $filters->since()) : '';
+$untilDate = $filters && $filters->until() !== null ? date('Y-m-d', $filters->until()) : '';
+
 ob_start();
 ?>
 
-<div class="max-w-6xl mx-auto space-y-8 animate-fade-in-up">
+<div class="max-w-6xl mx-auto space-y-6 animate-fade-in-up">
+  <!-- 搜索栏卡片 -->
   <div class="card bg-base-100/80 backdrop-blur border border-base-content/10 shadow-lg">
-    <div class="card-body gap-6">
-      <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+    <div class="card-body gap-4">
+      <form id="main_search_form" action="/search" method="get" class="w-full">
+        <?php
+          // 仅保留规范化后的非默认参数，保证改关键词后提交的 URL 仍是干净的可分享链接
+          $hiddenParams = $filters->toQueryParams((string) $q);
+          unset($hiddenParams['q'], $hiddenParams['page']);
+          foreach ($hiddenParams as $hk => $hv) {
+        ?>
+        <input type="hidden" name="<?=htmlspecialchars($hk)?>" value="<?=htmlspecialchars((string) $hv)?>" />
+        <?php } ?>
+        <div class="join w-full p-1 bg-base-200/60 rounded-2xl border border-base-content/10 focus-within:border-primary">
+          <input class="input join-item w-full bg-transparent focus:outline-none" name="q"
+            value="<?=htmlspecialchars((string) $q)?>" placeholder="输入关键词继续搜索" />
+          <button class="btn btn-primary join-item" type="submit">
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24"
+              stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+            </svg>
+          </button>
+        </div>
+      </form>
+
+      <div class="flex flex-wrap items-center justify-between gap-3">
+        <div class="text-sm opacity-70">
+          共找到 <span class="text-primary font-bold"><?=$total?></span> 条
+          <?php if (isset($from)) { ?>
+          <span class="badge badge-sm badge-ghost ml-2"><?=htmlspecialchars($from)?> 来源</span>
+          <?php } ?>
+        </div>
+        <!-- 排序：相关度 / 时间 / 大小 -->
+        <div class="join shadow-sm" role="tablist" aria-label="排序方式">
+          <a class="join-item btn btn-sm <?=($filters ? $filters->sort() : 'new') === 'relevance' ? 'btn-primary' : '' ?> <?=((string) $q) === '' ? 'pointer-events-none opacity-40' : ''?>"
+            href="<?=htmlspecialchars($sortUrl('relevance'))?>" title="无关键词时按相关度排序不可用">相关度</a>
+          <a class="join-item btn btn-sm <?=($filters ? $filters->sort() : 'new') === 'new' ? 'btn-primary' : '' ?>"
+            href="<?=htmlspecialchars($sortUrl('new'))?>">时间</a>
+          <a class="join-item btn btn-sm <?=($filters ? $filters->sort() : 'new') === 'size' ? 'btn-primary' : '' ?>"
+            href="<?=htmlspecialchars($sortUrl('size'))?>">大小</a>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="grid gap-6 lg:grid-cols-[260px_1fr] items-start">
+    <!-- 过滤器侧栏 -->
+    <aside class="card bg-base-100/80 backdrop-blur border border-base-content/10 shadow-lg lg:sticky lg:top-24">
+      <div class="card-body gap-5">
+        <div class="flex items-center justify-between">
+          <h2 class="font-bold flex items-center gap-2">
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 opacity-60" fill="none" viewBox="0 0 24 24"
+              stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z" />
+            </svg>
+            过滤器
+          </h2>
+          <?php if ($filters && !$filters->isEmpty()) { ?>
+          <a href="/search<?=((string) $q) !== '' ? '?' . http_build_query(['q' => (string) $q]) : ''?>"
+            class="badge badge-ghost badge-sm hover:badge-error transition-colors">清除</a>
+          <?php } ?>
+        </div>
+
+        <!-- 文件类型 -->
         <div>
-          <div class="text-sm opacity-60">搜索结果</div>
-          <div class="text-2xl font-bold">
-            <?=htmlspecialchars($q ?? '')?>
-          </div>
-          <div class="mt-2 text-sm opacity-70">
-            共找到 <span class="text-primary font-bold">
-              <?=$total?>
-            </span> 条
-            <?php if (isset($from)) { ?>
-            <span class="badge badge-sm badge-ghost ml-2">
-              <?=htmlspecialchars($from)?> 来源
-            </span>
+          <div class="text-xs font-bold uppercase tracking-wider opacity-50 mb-2">文件类型</div>
+          <div class="flex flex-col gap-1">
+            <?php foreach ($typeLabels as $value => $label) {
+                $on = in_array($value, $activeTypes, true); ?>
+            <a href="<?=htmlspecialchars($toggleUrl('types', $value, $activeTypes))?>"
+              class="flex items-center gap-2 px-2 py-1.5 rounded-lg text-sm hover:bg-base-200 transition-colors <?= $on ? 'text-primary font-semibold' : 'opacity-80' ?>">
+              <input type="checkbox" class="checkbox checkbox-sm checkbox-primary pointer-events-none"
+                <?= $on ? 'checked' : '' ?> tabindex="-1" />
+              <span><?=htmlspecialchars($label)?></span>
+            </a>
             <?php } ?>
           </div>
         </div>
-        <div class="w-full md:max-w-xl flex flex-col items-end gap-1">
-          <form class="w-full" action="/search" method="get">
-            <div
-              class="join w-full p-1 bg-base-200/60 rounded-2xl border border-base-content/10 focus-within:border-primary">
-              <input class="input join-item w-full bg-transparent focus:outline-none" name="q"
-                value="<?=htmlspecialchars($q ?? '')?>" placeholder="输入关键词继续搜索" />
-              <select class="select join-item bg-transparent focus:outline-none" name="sort">
-                <option value="new" <?=$sort==='new' ? 'selected' : '' ?>>最新</option>
-                <option value="size" <?=$sort==='size' ? 'selected' : '' ?>>大小</option>
-              </select>
-              <button class="btn btn-primary join-item" type="submit">
-                <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24"
-                  stroke="currentColor">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                    d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-                </svg>
-              </button>
-            </div>
-          </form>
-          <p class="text-xs text-base-content/50 px-2">
-            提示: Manticore 暂不支持英文单词前缀模糊搜索 (如 "Ubu")，请尝试输入完整单词 (如 "Ubuntu")。
-          </p>
+
+        <div class="divider my-0"></div>
+
+        <!-- 内容标签 -->
+        <div>
+          <div class="text-xs font-bold uppercase tracking-wider opacity-50 mb-2">标签</div>
+          <div class="flex flex-wrap gap-2">
+            <?php foreach ($tagLabels as $value => $label) {
+                $on = in_array($value, $activeTags, true); ?>
+            <a href="<?=htmlspecialchars($toggleUrl('tags', $value, $activeTags))?>"
+              class="badge <?= $on ? 'badge-primary' : 'badge-outline' ?> cursor-pointer hover:badge-primary transition-colors">
+              <?=htmlspecialchars($label)?>
+            </a>
+            <?php } ?>
+          </div>
+        </div>
+
+        <div class="divider my-0"></div>
+
+        <!-- 大小区间（单位 MB） -->
+        <form id="size_filter_form" action="/search" method="get">
+          <div data-filter-hidden-fields></div>
+          <div class="text-xs font-bold uppercase tracking-wider opacity-50 mb-2">大小区间 (MB)</div>
+          <div class="flex items-center gap-2">
+            <input type="number" name="smin_mb" min="0" step="0.01" placeholder="最小"
+              value="<?=htmlspecialchars((string) $sizeMinMb)?>" class="input input-bordered input-sm w-full" />
+            <span class="opacity-40">–</span>
+            <input type="number" name="smax_mb" min="0" step="0.01" placeholder="最大"
+              value="<?=htmlspecialchars((string) $sizeMaxMb)?>" class="input input-bordered input-sm w-full" />
+          </div>
+          <button type="submit" class="btn btn-sm btn-outline btn-primary w-full mt-2">应用大小</button>
+        </form>
+
+        <div class="divider my-0"></div>
+
+        <!-- 收录时间 -->
+        <form id="time_filter_form" action="/search" method="get">
+          <div data-filter-hidden-fields></div>
+          <div class="text-xs font-bold uppercase tracking-wider opacity-50 mb-2">收录时间</div>
+          <div class="grid grid-cols-2 gap-2 mb-2" role="group" aria-label="时间范围">
+            <?php
+              $timePresets = [
+                  '24h' => ['label' => '24 小时', 'days' => 1],
+                  '7d' => ['label' => '近 7 天', 'days' => 7],
+                  '30d' => ['label' => '近 30 天', 'days' => 30],
+                  '1y' => ['label' => '近一年', 'days' => 365],
+              ];
+              foreach ($timePresets as $preset) {
+                  $todayEnd = strtotime('today 23:59:59') ?: time();
+                  $expectedSince = strtotime("-{$preset['days']} days 00:00:00");
+                  $activePreset = $filters && $filters->since() !== null && $filters->until() !== null
+                      && $expectedSince !== false
+                      && abs($filters->since() - $expectedSince) < 7200
+                      && abs($filters->until() - $todayEnd) < 7200;
+            ?>
+            <button type="button" data-time-preset="<?=$preset['days']?>"
+              class="btn btn-sm <?= $activePreset ? 'btn-primary' : 'btn-outline' ?>"><?=htmlspecialchars($preset['label'])?></button>
+            <?php } ?>
+          </div>
+          <div class="flex flex-col gap-2">
+            <label class="text-xs opacity-60 flex items-center gap-2">起
+              <input type="date" name="since_date" value="<?=htmlspecialchars($sinceDate)?>"
+                class="input input-bordered input-xs w-full" />
+            </label>
+            <label class="text-xs opacity-60 flex items-center gap-2">止
+              <input type="date" name="until_date" value="<?=htmlspecialchars($untilDate)?>"
+                class="input input-bordered input-xs w-full" />
+            </label>
+          </div>
+          <button type="submit" class="btn btn-sm btn-outline btn-primary w-full mt-2">应用时间</button>
+        </form>
+      </div>
+    </aside>
+
+    <!-- 结果区 -->
+    <div class="space-y-4 min-w-0">
+      <?php
+        // 当前生效条件（可单独移除）
+        $activeChips = [];
+        foreach ($activeTypes as $t) {
+            $activeChips[] = ['url' => $toggleUrl('types', $t, $activeTypes), 'label' => $typeLabels[$t]];
+        }
+        foreach ($activeTags as $t) {
+            $activeChips[] = ['url' => $toggleUrl('tags', $t, $activeTags), 'label' => '#' . $tagLabels[$t]];
+        }
+      ?>
+      <?php if ($activeChips || $sizeMinMb !== '' || $sizeMaxMb !== '' || $sinceDate || $untilDate) { ?>
+      <div class="flex flex-wrap items-center gap-2 text-sm">
+        <span class="opacity-50 text-xs">已选条件:</span>
+        <?php foreach ($activeChips as $chip) { ?>
+        <a href="<?=htmlspecialchars($chip['url'])?>"
+          class="badge badge-primary badge-sm gap-1"><?=htmlspecialchars($chip['label'])?> ✕</a>
+        <?php } ?>
+        <?php if ($sizeMinMb !== '' || $sizeMaxMb !== '') {
+            $params = $filters->toQueryParams((string) $q);
+            unset($params['smin'], $params['smax']);
+        ?>
+        <a href="/search<?=$params ? '?' . http_build_query($params) : ''?>" class="badge badge-secondary badge-sm gap-1">
+          大小: <?=htmlspecialchars($sizeMinMb !== '' ? $sizeMinMb . 'MB 起' : '')?><?=htmlspecialchars($sizeMaxMb !== '' ? '≤ ' . $sizeMaxMb . 'MB' : '')?> ✕
+        </a>
+        <?php } ?>
+        <?php if ($sinceDate || $untilDate) {
+            $params = $filters->toQueryParams((string) $q);
+            unset($params['since'], $params['until']);
+        ?>
+        <a href="/search<?=$params ? '?' . http_build_query($params) : ''?>" class="badge badge-accent badge-sm gap-1">
+          时间: <?=htmlspecialchars($sinceDate ?: '…')?> ~ <?=htmlspecialchars($untilDate ?: '今')?> ✕
+        </a>
+        <?php } ?>
+      </div>
+      <?php } ?>
+
+      <?php if (empty($items)) { ?>
+      <div class="hero min-h-[40vh] bg-base-200/30 rounded-3xl border border-dashed border-base-content/20">
+        <div class="hero-content text-center">
+          <div class="max-w-md">
+            <h1 class="text-3xl font-bold opacity-30">没有找到结果</h1>
+            <p class="py-6 opacity-60">换个关键词或放宽过滤条件试试。</p>
+            <a href="/search<?=((string) $q) !== '' ? '?' . http_build_query(['q' => (string) $q]) : ''?>"
+              class="btn btn-outline btn-primary btn-sm">清除全部过滤条件</a>
+          </div>
         </div>
       </div>
-    </div>
-  </div>
+      <?php } else { ?>
 
-  <?php if (empty($items)) { ?>
-  <div class="hero min-h-[40vh] bg-base-200/30 rounded-3xl border border-dashed border-base-content/20">
-    <div class="hero-content text-center">
-      <div class="max-w-md">
-        <h1 class="text-3xl font-bold opacity-30">没有找到结果</h1>
-        <p class="py-6 opacity-60">换个关键词试试，或稍后再来。</p>
+      <div class="overflow-hidden rounded-2xl border border-base-content/10 shadow-lg bg-base-100/90">
+        <table class="table table-lg">
+          <thead class="bg-base-200/60 text-base-content/70">
+            <tr>
+              <th class="font-bold uppercase tracking-wider text-xs">资源名称</th>
+              <th class="w-28 font-bold uppercase tracking-wider text-xs">大小</th>
+              <th class="w-28 font-bold uppercase tracking-wider text-xs hidden md:table-cell">收录时间</th>
+            </tr>
+          </thead>
+          <tbody>
+            <?php foreach ($items as $it) { ?>
+            <?php
+                  $infohash = (string) ($it['infohash'] ?? '');
+                  $name = (string) ($it['name'] ?? '');
+                  $nameHighlight = $it['name_highlight'] ?? null;
+                  $sizeTotal = (int) ($it['size_total'] ?? 0);
+                  $createdRaw = $it['created_at'] ?? null;
+                  if (is_numeric($createdRaw)) {
+                      $createdDisplay = ((int) $createdRaw) > 0 ? date('Y-m-d', (int) $createdRaw) : '';
+                  } elseif (is_string($createdRaw)) {
+                      $createdDisplay = substr($createdRaw, 0, 10);
+                  } else {
+                      $createdDisplay = '';
+                  }
+                  $rowType = (string) ($it['file_type'] ?? '');
+                  $rowTypeLabel = $rowType !== '' ? ($typeLabels[$rowType] ?? $rowType) : '';
+                ?>
+            <tr class="group hover:bg-base-200/40 transition-colors duration-200">
+              <td class="max-w-lg">
+                <a class="block font-medium group-hover:text-primary transition-colors text-base"
+                  href="/torrent/<?=htmlspecialchars($infohash)?>">
+                  <div class="flex items-center gap-3">
+                    <div
+                      class="p-2 bg-primary/10 rounded-lg text-primary group-hover:bg-primary group-hover:text-primary-content transition-colors">
+                      <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24"
+                        stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                          d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                      </svg>
+                    </div>
+                    <div class="min-w-0">
+                      <div class="truncate">
+                        <?php if ($nameHighlight) { ?>
+                        <?=strip_tags((string) $nameHighlight, '<b><span class="text-primary">')?>
+                        <?php } else { ?>
+                        <?=htmlspecialchars($name)?>
+                        <?php } ?>
+                      </div>
+                      <?php if ($rowTypeLabel !== '') { ?>
+                      <span class="badge badge-xs badge-ghost mt-1"><?=htmlspecialchars($rowTypeLabel)?></span>
+                      <?php } ?>
+                    </div>
+                  </div>
+                </a>
+              </td>
+              <td class="font-mono text-sm opacity-80 whitespace-nowrap">
+                <?=format_size($sizeTotal)?>
+              </td>
+              <td class="hidden md:table-cell text-xs opacity-60 whitespace-nowrap">
+                <?=$createdDisplay !== '' ? htmlspecialchars($createdDisplay) : '-'?>
+              </td>
+            </tr>
+            <?php } ?>
+          </tbody>
+        </table>
       </div>
+
+      <!-- 分页 -->
+      <?php
+          $pageSize = (int) ($page_size ?? 20);
+          $pageCount = $pageSize > 0 ? (int) ceil($total / $pageSize) : 1;
+          $pageCount = max(1, $pageCount);
+          $prev = max(1, $page - 1);
+          $next = min($pageCount, $page + 1);
+          $baseParams = $filters->toQueryParams((string) $q);
+          $pageLink = function (int $p) use ($baseParams) {
+              $params = $baseParams;
+              if ($p > 1) {
+                  $params['page'] = $p;
+              }
+              return '/search' . ($params ? '?' . http_build_query($params) : '');
+          };
+        ?>
+      <div class="flex items-center justify-between border-t border-base-content/10 pt-6">
+        <span class="text-sm opacity-60">第 <?=$page?> / <?=$pageCount?> 页</span>
+        <div class="join shadow-sm">
+          <a class="join-item btn btn-sm <?= $page <= 1 ? 'btn-disabled' : '' ?>"
+            href="<?=htmlspecialchars($pageLink($prev))?>">上一页</a>
+          <button class="join-item btn btn-sm btn-active pointer-events-none"><?=$page?></button>
+          <a class="join-item btn btn-sm <?= $page >= $pageCount ? 'btn-disabled' : '' ?>"
+            href="<?=htmlspecialchars($pageLink($next))?>">下一页</a>
+        </div>
+      </div>
+      <?php } ?>
     </div>
   </div>
-  <?php } else { ?>
-
-  <div class="overflow-hidden rounded-2xl border border-base-content/10 shadow-lg bg-base-100/90">
-    <table class="table table-lg">
-      <thead class="bg-base-200/60 text-base-content/70">
-        <tr>
-          <th class="font-bold uppercase tracking-wider text-xs">资源名称</th>
-          <th class="w-32 font-bold uppercase tracking-wider text-xs">大小</th>
-          <th class="w-48 font-bold uppercase tracking-wider text-xs hidden md:table-cell">信息</th>
-        </tr>
-      </thead>
-      <tbody>
-        <?php foreach ($items as $it) { ?>
-        <?php
-              $infohash = (string) ($it['infohash'] ?? '');
-              $name = (string) ($it['name'] ?? '');
-              $nameHighlight = $it['name_highlight'] ?? null;
-              $sizeTotal = (int) ($it['size_total'] ?? 0);
-            ?>
-        <tr class="group hover:bg-base-200/40 transition-colors duration-200">
-          <td class="max-w-lg">
-            <a class="block font-medium group-hover:text-primary transition-colors text-base"
-              href="/torrent/<?=htmlspecialchars($infohash)?>">
-              <div class="flex items-center gap-3">
-                <div
-                  class="p-2 bg-primary/10 rounded-lg text-primary group-hover:bg-primary group-hover:text-primary-content transition-colors">
-                  <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24"
-                    stroke="currentColor">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                      d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                  </svg>
-                </div>
-                <div class="truncate">
-                  <?php if ($nameHighlight) { ?>
-                  <?=strip_tags((string) $nameHighlight, '<b><span class="text-primary">')?>
-                  <?php } else { ?>
-                  <?=htmlspecialchars($name)?>
-                  <?php } ?>
-                </div>
-              </div>
-            </a>
-          </td>
-          <td class="font-mono text-sm opacity-80 whitespace-nowrap">
-            <?=format_size($sizeTotal)?>
-          </td>
-          <td class="hidden md:table-cell">
-            <div class="flex flex-col gap-1">
-              <span class="badge badge-xs badge-neutral font-mono opacity-50">
-                <?=substr($infohash, 0, 7)?>...
-              </span>
-            </div>
-          </td>
-        </tr>
-        <?php } ?>
-      </tbody>
-    </table>
-  </div>
-
-  <!-- Pagination -->
-  <?php
-      $pageSize = (int) ($page_size ?? 20);
-      $pageCount = $pageSize > 0 ? (int) ceil($total / $pageSize) : 1;
-      $pageCount = max(1, $pageCount);
-      $prev = max(1, $page - 1);
-      $next = min($pageCount, $page + 1);
-      $qs = http_build_query(['q' => $q, 'sort' => $sort]);
-    ?>
-  <div class="flex items-center justify-between border-t border-base-content/10 pt-6">
-    <span class="text-sm opacity-60">第
-      <?=$page?> /
-      <?=$pageCount?> 页
-    </span>
-    <div class="join shadow-sm">
-      <a class="join-item btn btn-sm <?= $page <= 1 ? 'btn-disabled' : '' ?>"
-        href="/search?<?=$qs?>&page=<?=$prev?>">上一页</a>
-      <button class="join-item btn btn-sm btn-active pointer-events-none">
-        <?=$page?>
-      </button>
-      <a class="join-item btn btn-sm <?= $page >= $pageCount ? 'btn-disabled' : '' ?>"
-        href="/search?<?=$qs?>&page=<?=$next?>">下一页</a>
-    </div>
-  </div>
-  <?php } ?>
 </div>
+
+<script>
+(function () {
+  // 服务端渲染出的当前规范化参数，过滤器表单据此保留关键词及其它条件
+  var BASE_PARAMS = <?=json_encode($filters->toQueryParams((string) $q), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)?>;
+
+  function formatLocalDate(date) {
+    var m = String(date.getMonth() + 1).padStart(2, '0');
+    var day = String(date.getDate()).padStart(2, '0');
+    return date.getFullYear() + '-' + m + '-' + day;
+  }
+
+  // 向表单 holder 写入需要保留的 hidden 字段（排除本表单自己管理的字段）
+  function syncHiddenFields(form, exclude) {
+    var holder = form.querySelector('[data-filter-hidden-fields]');
+    if (!holder) return;
+    holder.innerHTML = '';
+    Object.keys(BASE_PARAMS).forEach(function (key) {
+      if (exclude.indexOf(key) !== -1) return;
+      var input = document.createElement('input');
+      input.type = 'hidden';
+      input.name = key;
+      input.value = BASE_PARAMS[key];
+      holder.appendChild(input);
+    });
+  }
+
+  // 大小区间：前端 MB -> 后端字节
+  var sizeForm = document.getElementById('size_filter_form');
+  if (sizeForm) {
+    syncHiddenFields(sizeForm, ['smin', 'smax']);
+    sizeForm.addEventListener('submit', function () {
+      var holder = sizeForm.querySelector('[data-filter-hidden-fields]');
+      var MB = 1024 * 1024;
+      [['smin_mb', 'smin'], ['smax_mb', 'smax']].forEach(function (pair) {
+        var el = sizeForm.elements[pair[0]];
+        var v = parseFloat(el.value);
+        if (!isNaN(v) && v >= 0) {
+          var input = document.createElement('input');
+          input.type = 'hidden';
+          input.name = pair[1];
+          input.value = String(Math.round(v * MB));
+          holder.appendChild(input);
+        }
+      });
+      // 仅提交换算后的字节参数，避免辅助输入框污染 URL
+      sizeForm.querySelectorAll('input:not([type="hidden"])').forEach(function (el) { el.disabled = true; });
+    });
+  }
+
+  // 收录时间：日期输入 -> 当日起止时间戳；快捷预设
+  var timeForm = document.getElementById('time_filter_form');
+  if (timeForm) {
+    syncHiddenFields(timeForm, ['since', 'until']);
+    function clearPresetActive() {
+      timeForm.querySelectorAll('[data-time-preset]').forEach(function (b) {
+        b.classList.remove('btn-primary');
+        b.classList.add('btn-outline');
+      });
+    }
+    function addTimeFields(holder, sinceVal, untilVal) {
+      if (sinceVal) {
+        var s = document.createElement('input');
+        s.type = 'hidden'; s.name = 'since';
+        s.value = String(Math.floor(new Date(sinceVal + 'T00:00:00').getTime() / 1000));
+        holder.appendChild(s);
+      }
+      if (untilVal) {
+        var u = document.createElement('input');
+        u.type = 'hidden'; u.name = 'until';
+        u.value = String(Math.floor(new Date(untilVal + 'T23:59:59').getTime() / 1000));
+        holder.appendChild(u);
+      }
+    }
+    timeForm.querySelectorAll('[data-time-preset]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var days = parseInt(btn.getAttribute('data-time-preset'), 10);
+        var d = new Date();
+        var past = new Date(d.getTime() - days * 86400 * 1000);
+        timeForm.elements['since_date'].value = formatLocalDate(past);
+        timeForm.elements['until_date'].value = formatLocalDate(d);
+        if (typeof timeForm.requestSubmit === 'function') {
+          // 会触发 submit 监听，由监听补齐时间戳隐藏字段
+          timeForm.requestSubmit();
+        } else {
+          // 旧浏览器：先触发监听补齐字段，再提交
+          timeForm.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+          timeForm.submit();
+        }
+      });
+    });
+    timeForm.addEventListener('submit', function () {
+      var holder = timeForm.querySelector('[data-filter-hidden-fields]');
+      addTimeFields(
+        holder,
+        timeForm.elements['since_date'].value,
+        timeForm.elements['until_date'].value
+      );
+      // 仅提交换算后的时间戳参数，避免辅助日期框污染 URL
+      timeForm.querySelectorAll('input:not([type="hidden"])').forEach(function (el) { el.disabled = true; });
+    });
+    ['since_date', 'until_date'].forEach(function (name) {
+      var el = timeForm.elements[name];
+      if (el) el.addEventListener('change', clearPresetActive);
+    });
+  }
+})();
+</script>
 
 <?php
 $content = ob_get_clean();

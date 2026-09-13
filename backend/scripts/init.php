@@ -2,6 +2,9 @@
 
 require_once __DIR__ . '/../vendor/autoload.php';
 
+use app\service\SearchFilters;
+use app\service\TorrentClassifier;
+
 if ((getenv('APP_RUN_MODE') ?: 'http') === 'crawler') {
     exit(0);
 }
@@ -83,17 +86,40 @@ function http_post(string $url, string $body, array $headers = []): array
 
 function ensure_manticore_table(string $baseUrl, string $table): void
 {
-    $sql = "CREATE TABLE IF NOT EXISTS {$table}(name text, infohash string, size_total bigint, created_at timestamp) morphology='jieba_chinese'";
+    $sql = "CREATE TABLE IF NOT EXISTS {$table}(name text, infohash string, size_total bigint, created_at timestamp, file_type string, tags multi) morphology='jieba_chinese'";
     [$code, $resp] = http_post(rtrim($baseUrl, '/') . '/cli', $sql);
     if ($code < 200 || $code >= 300) {
         throw new RuntimeException("manticore cli http {$code}: {$resp}");
     }
+
+    // 平滑升级旧索引：逐列补齐，已存在的字段忽略错误
+    foreach ([
+        "ALTER TABLE {$table} ADD COLUMN file_type string",
+        "ALTER TABLE {$table} ADD COLUMN tags multi",
+    ] as $alter) {
+        [$code2, $resp2] = http_post(rtrim($baseUrl, '/') . '/cli', $alter);
+        if ($code2 < 200 || $code2 >= 300) {
+            $low = strtolower($resp2);
+            if (!str_contains($low, 'duplicate attribute') && !str_contains($low, 'already exists')) {
+                fwrite(STDERR, "manticore alter warning: {$resp2}\n");
+            }
+        }
+    }
 }
 
-function manticore_replace(string $baseUrl, string $table, int $id, string $infohash, string $name, int $sizeTotal, int $createdAt): void
+function manticore_replace(string $baseUrl, string $table, int $id, string $infohash, string $name, int $sizeTotal, int $createdAt, string $fileType = '', array $tags = []): void
 {
     $escapedName = str_replace("'", "''", $name);
-    $sql = "REPLACE INTO {$table}(id, name, infohash, size_total, created_at) VALUES ({$id}, '{$escapedName}', '{$infohash}', {$sizeTotal}, {$createdAt})";
+    $escapedType = str_replace("'", "''", $fileType);
+    $tagIds = [];
+    foreach ($tags as $tag) {
+        $tag = strtolower(trim($tag));
+        if (in_array($tag, SearchFilters::TAGS, true)) {
+            $tagIds[] = SearchFilters::tagId($tag);
+        }
+    }
+    $tagIdsSql = implode(',', array_map('intval', array_unique($tagIds)));
+    $sql = "REPLACE INTO {$table}(id, name, infohash, size_total, created_at, file_type, tags) VALUES ({$id}, '{$escapedName}', '{$infohash}', {$sizeTotal}, {$createdAt}, '{$escapedType}', ({$tagIdsSql}))";
     [$code, $resp] = http_post(rtrim($baseUrl, '/') . '/cli', $sql);
     if ($code < 200 || $code >= 300) {
         throw new RuntimeException("manticore replace http {$code}: {$resp}");
@@ -121,15 +147,22 @@ CREATE TABLE IF NOT EXISTS torrents (
   size_total BIGINT UNSIGNED NOT NULL DEFAULT 0,
   file_count INT UNSIGNED NOT NULL DEFAULT 0,
   extension VARCHAR(16) NOT NULL DEFAULT '',
+  file_type VARCHAR(16) NOT NULL DEFAULT '',
+  tags_csv VARCHAR(128) NOT NULL DEFAULT '',
   files_json JSON NULL,
   status VARCHAR(32) NOT NULL DEFAULT 'new',
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  KEY idx_file_type (file_type),
+  KEY idx_created_at (created_at),
+  KEY idx_size_total (size_total)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
 SQL);
 
 add_column_if_missing($pdo, $dbName, 'torrents', 'file_count', 'file_count INT UNSIGNED NOT NULL DEFAULT 0');
 add_column_if_missing($pdo, $dbName, 'torrents', 'extension', "extension VARCHAR(16) NOT NULL DEFAULT ''");
+add_column_if_missing($pdo, $dbName, 'torrents', 'file_type', "file_type VARCHAR(16) NOT NULL DEFAULT ''");
+add_column_if_missing($pdo, $dbName, 'torrents', 'tags_csv', "tags_csv VARCHAR(128) NOT NULL DEFAULT ''");
 
 $pdo->exec(<<<'SQL'
 CREATE TABLE IF NOT EXISTS torrent_peers (
@@ -194,9 +227,35 @@ if ($count === 0) {
         ],
     ];
 
-    $stmt = $pdo->prepare('INSERT INTO torrents(infohash,name,size_total,file_count,extension,files_json,status) VALUES (:infohash,:name,:size_total,:file_count,:extension,:files_json,:status)');
+    $stmt = $pdo->prepare('INSERT INTO torrents(infohash,name,size_total,file_count,extension,file_type,tags_csv,files_json,status) VALUES (:infohash,:name,:size_total,:file_count,:extension,:file_type,:tags_csv,:files_json,:status)');
     foreach ($seed as $row) {
+        $files = json_decode($row['files_json'], true) ?: [];
+        $cls = TorrentClassifier::classify($row['name'], $files, $row['extension']);
+        $row['file_type'] = $cls['type'];
+        $row['tags_csv'] = implode(',', $cls['tags']);
         $stmt->execute($row);
+    }
+}
+
+// 存量数据回填分类信息（幂等：仅处理未分类的行，分批执行）
+while (true) {
+    $rows = $pdo->query("SELECT infohash,name,extension,files_json FROM torrents WHERE file_type = '' LIMIT 500")->fetchAll();
+    if (!$rows) {
+        break;
+    }
+    $upd = $pdo->prepare('UPDATE torrents SET file_type = :ft, tags_csv = :tags WHERE infohash = :ih');
+    foreach ($rows as $row) {
+        $files = [];
+        if (!empty($row['files_json'])) {
+            $decoded = json_decode($row['files_json'], true);
+            $files = is_array($decoded) ? $decoded : [];
+        }
+        $cls = TorrentClassifier::classify((string) $row['name'], $files, (string) $row['extension']);
+        $upd->execute([
+            'ft' => $cls['type'],
+            'tags' => implode(',', array_slice($cls['tags'], 0, 8)),
+            'ih' => $row['infohash'],
+        ]);
     }
 }
 
@@ -243,9 +302,10 @@ wait_manticore($manticoreBase, 60, 1000);
 
 ensure_manticore_table($manticoreBase, $manticoreIndex);
 
-$rows = $pdo->query('SELECT infohash,name,size_total,UNIX_TIMESTAMP(created_at) AS created_ts FROM torrents ORDER BY created_at DESC LIMIT 50')->fetchAll();
+$rows = $pdo->query('SELECT infohash,name,size_total,file_type,tags_csv,UNIX_TIMESTAMP(created_at) AS created_ts FROM torrents WHERE status <> "spam" ORDER BY created_at DESC LIMIT 2000')->fetchAll();
 foreach ($rows as $row) {
     $id = (int) hexdec(substr($row['infohash'], 0, 15));
+    $tags = $row['tags_csv'] !== '' ? explode(',', (string) $row['tags_csv']) : [];
     manticore_replace(
         $manticoreBase,
         $manticoreIndex,
@@ -253,7 +313,9 @@ foreach ($rows as $row) {
         $row['infohash'],
         $row['name'],
         (int) $row['size_total'],
-        (int) $row['created_ts']
+        (int) $row['created_ts'],
+        (string) $row['file_type'],
+        $tags
     );
 }
 

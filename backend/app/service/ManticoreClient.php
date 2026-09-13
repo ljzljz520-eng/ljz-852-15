@@ -17,7 +17,7 @@ class ManticoreClient
         $this->timeoutSeconds = $timeoutSeconds;
     }
 
-    public function search(string $q, int $page, int $pageSize, string $sort): array
+    public function search(string $q, int $page, int $pageSize, string $sort, ?SearchFilters $filters = null): array
     {
         $page = max(1, $page);
         $pageSize = max(1, min(50, $pageSize));
@@ -38,11 +38,25 @@ class ManticoreClient
             ],
         ];
 
+        $boolFilters = $filters ? $filters->toManticoreFilters() : [];
+        if ($boolFilters) {
+            // 与全文 match 做 AND
+            $query['query'] = [
+                'bool' => [
+                    'must' => array_merge(
+                        [['match' => ['*' => $matchQuery]]],
+                        $boolFilters['bool']['must']
+                    ),
+                ],
+            ];
+        }
+
         if ($sort === 'new') {
             $query['sort'] = [['created_at' => 'desc']];
         } elseif ($sort === 'size') {
             $query['sort'] = [['size_total' => 'desc']];
         }
+        // relevance：不指定 sort，Manticore 默认按相关度权重降序
 
         $resp = $this->postJson('/search', $query);
 
@@ -60,6 +74,7 @@ class ManticoreClient
                 'name_highlight' => $nameSnippets ? (string) $nameSnippets[0] : null,
                 'size_total' => (int) ($source['size_total'] ?? 0),
                 'created_at' => (int) ($source['created_at'] ?? 0),
+                'file_type' => (string) ($source['file_type'] ?? ''),
             ];
         }
 

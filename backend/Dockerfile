@@ -20,7 +20,7 @@ RUN apk add --no-cache \
     linux-headers \
     $PHPIZE_DEPS \
   && update-ca-certificates \
-  && docker-php-ext-install -j$(nproc) pdo_mysql sockets intl zip curl pcntl \
+  && docker-php-ext-install -j$(nproc) pdo_mysql sockets intl zip curl pcntl mbstring \
   && pecl install redis \
   && docker-php-ext-enable redis \
   && apk del $PHPIZE_DEPS

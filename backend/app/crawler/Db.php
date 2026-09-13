@@ -56,10 +56,15 @@ CREATE TABLE IF NOT EXISTS torrents (
   size_total BIGINT UNSIGNED NOT NULL DEFAULT 0,
   file_count INT UNSIGNED NOT NULL DEFAULT 0,
   extension VARCHAR(16) NOT NULL DEFAULT '',
+  file_type VARCHAR(16) NOT NULL DEFAULT '',
+  tags_csv VARCHAR(128) NOT NULL DEFAULT '',
   files_json JSON NULL,
   status VARCHAR(32) NOT NULL DEFAULT 'new',
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  KEY idx_file_type (file_type),
+  KEY idx_created_at (created_at),
+  KEY idx_size_total (size_total)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
 SQL);
 
@@ -67,6 +72,8 @@ SQL);
         if ($dbName !== '') {
             $this->addColumnIfMissing($dbName, 'torrents', 'file_count', 'file_count INT UNSIGNED NOT NULL DEFAULT 0');
             $this->addColumnIfMissing($dbName, 'torrents', 'extension', "extension VARCHAR(16) NOT NULL DEFAULT ''");
+            $this->addColumnIfMissing($dbName, 'torrents', 'file_type', "file_type VARCHAR(16) NOT NULL DEFAULT ''");
+            $this->addColumnIfMissing($dbName, 'torrents', 'tags_csv', "tags_csv VARCHAR(128) NOT NULL DEFAULT ''");
         }
 
         $this->pdo->exec(<<<'SQL'
@@ -147,16 +154,19 @@ SQL);
         return $stmt->fetchAll();
     }
 
-    public function upsertTorrent(string $infohash, string $name, int $sizeTotal, ?array $files, string $status, int $fileCount, string $extension): void
+    public function upsertTorrent(string $infohash, string $name, int $sizeTotal, ?array $files, string $status, int $fileCount, string $extension, string $fileType = '', array $tags = []): void
     {
         $filesJson = $files ? json_encode($files, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) : null;
-        $stmt = $this->pdo->prepare('INSERT INTO torrents(infohash,name,size_total,file_count,extension,files_json,status) VALUES (:infohash,:name,:size_total,:file_count,:extension,:files_json,:status) ON DUPLICATE KEY UPDATE name=VALUES(name), size_total=VALUES(size_total), file_count=VALUES(file_count), extension=VALUES(extension), files_json=VALUES(files_json), status=VALUES(status)');
+        $tagsCsv = implode(',', array_slice($tags, 0, 8));
+        $stmt = $this->pdo->prepare('INSERT INTO torrents(infohash,name,size_total,file_count,extension,file_type,tags_csv,files_json,status) VALUES (:infohash,:name,:size_total,:file_count,:extension,:file_type,:tags_csv,:files_json,:status) ON DUPLICATE KEY UPDATE name=VALUES(name), size_total=VALUES(size_total), file_count=VALUES(file_count), extension=VALUES(extension), file_type=VALUES(file_type), tags_csv=VALUES(tags_csv), files_json=VALUES(files_json), status=VALUES(status)');
         $stmt->execute([
             'infohash' => $infohash,
             'name' => $name,
             'size_total' => $sizeTotal,
             'file_count' => $fileCount,
             'extension' => $extension,
+            'file_type' => $fileType,
+            'tags_csv' => $tagsCsv,
             'files_json' => $filesJson,
             'status' => $status,
         ]);

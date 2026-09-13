@@ -2,6 +2,8 @@
 
 namespace app\crawler;
 
+use app\service\TorrentClassifier;
+
 class IndexerWorker
 {
     private Db $db;
@@ -46,13 +48,14 @@ class IndexerWorker
         }
 
         if ($this->isSpam($fileCount, $extension)) {
-            $this->db->upsertTorrent($infohash, $name, $sizeTotal, $files, 'spam', $fileCount, $extension);
+            $this->db->upsertTorrent($infohash, $name, $sizeTotal, $files, 'spam', $fileCount, $extension, '', []);
             $this->db->markQueue($infohash, 'spam', 0, null);
             return;
         }
 
-        $this->db->upsertTorrent($infohash, $name, $sizeTotal, $files, 'fetched', $fileCount, $extension);
-        $this->indexer->upsert($infohash, $name, $sizeTotal, $createdAt);
+        $classification = TorrentClassifier::classify($name, is_array($files) ? $files : [], $extension);
+        $this->db->upsertTorrent($infohash, $name, $sizeTotal, $files, 'fetched', $fileCount, $extension, $classification['type'], $classification['tags']);
+        $this->indexer->upsert($infohash, $name, $sizeTotal, $createdAt, $classification['type'], $classification['tags']);
         $this->db->markQueue($infohash, 'done', 0, null);
     }
 
